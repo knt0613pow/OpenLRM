@@ -104,7 +104,6 @@ class TriplaneSynthesizer(nn.Module):
         
         cam2world_matrix = cameras[..., :16].view(N, M, 4, 4)
         intrinsics = cameras[..., 16:25].view(N, M, 3, 3)
-
         # Create a batch of rays for volume rendering
         ray_origins, ray_directions = self.ray_sampler(
             cam2world_matrix=cam2world_matrix.reshape(-1, 4, 4),

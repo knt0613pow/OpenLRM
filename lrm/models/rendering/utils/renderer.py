@@ -59,14 +59,24 @@ def project_onto_planes(planes, coordinates):
     return projections[..., :2]
 
 def sample_from_planes(plane_axes, plane_features, coordinates, mode='bilinear', padding_mode='zeros', box_warp=None):
+    breakpoint()
+    '''
+    plane_axes: axes of planes of shape n_planes, (3,3, 3)
+    plane_features: (N_view, 3, dimention, grid_size, grid_size)
+    coordinates: (N_view, num_ray * num_sample_per_ray, 3)
+    
+    '''
     assert padding_mode == 'zeros'
     N, n_planes, C, H, W = plane_features.shape
     _, M, _ = coordinates.shape
     plane_features = plane_features.view(N*n_planes, C, H, W)
 
     coordinates = (2/box_warp) * coordinates # add specific box bounds
+    # coordinates bound in [-1, 1]; not exactly since there are can be out-of-box samples
+    # e.g. when box_warp = 2, box bounds are [-1, 1](general config), then above code not work
 
     projected_coordinates = project_onto_planes(plane_axes, coordinates).unsqueeze(1)
+    # projected_coordinates : [N*n_planes, 1, num_ray * num_saple_per_ray, 2]
     output_features = torch.nn.functional.grid_sample(plane_features, projected_coordinates.float(), mode=mode, padding_mode=padding_mode, align_corners=False).permute(0, 3, 2, 1).reshape(N, n_planes, M, C)
     return output_features
 
@@ -114,18 +124,27 @@ class ImportanceRenderer(torch.nn.Module):
         """
 
         # context related variables
+        # depths : [num_view, num_ray, depth_resoltion, 1]
+        # ray_directions : [num_view, num_ray, 3]
         batch_size, num_rays, samples_per_ray, _ = depths.shape
         device = depths.device
 
         # define sample points with depths
         sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, samples_per_ray, -1).reshape(batch_size, -1, 3)
+        # ray_directions.unsqueeze(-2) : [num_view, num_ray, 1, 3]
+        # ray_directions.unsqueeze(-2).expand(-1, -1, samples_per_ray, -1) : [num_view, num_ray, depth_resolution, 3]
+        # ray_directions.unsqueeze(-2).expand(-1, -1, samples_per_ray, -1).reshape(batch_size, -1, 3) : [num_view, num_ray*depth_resolution, 3]
         sample_coordinates = (ray_origins.unsqueeze(-2) + depths * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
+        
+        # sample_coordinates : sampled points on the ray
+        # [num_view, num_ray*depth_resolution, 3]
 
         # filter out-of-box samples
         mask_inbox = \
             (rendering_options['sampler_bbox_min'] <= sample_coordinates) & \
                 (sample_coordinates <= rendering_options['sampler_bbox_max'])
         mask_inbox = mask_inbox.all(-1)
+        # mask inbox [num_view, num_ray*depth_resolution] ; True if all three coordinates are in the box
 
         # forward model according to all samples
         _out = self.run_model(planes, decoder, sample_coordinates, sample_directions, rendering_options)
@@ -148,23 +167,38 @@ class ImportanceRenderer(torch.nn.Module):
 
         if rendering_options['ray_start'] == rendering_options['ray_end'] == 'auto':
             ray_start, ray_end = math_utils.get_ray_limits_box(ray_origins, ray_directions, box_side_length=rendering_options['box_warp'])
+            # box warps : 2.0
+            #ray origins [2, 192*192, 3] , 2 is num of view
+            # ray directions [2, 192*192, 3]
+            # ray start : [2, 36864, 1]
+            # ray end : [2, 36864, 1]
+            # e.g. 
+            # ray_origins[0,0]  + ray_start[0,0] * ray_directions[0,0]  : tensor([-0.4675, -1.0000,  0.9465], device='cuda:0')
+            # ray_origins[0,0]  + ray_end[0,0] * ray_directions[0,0]    : tensor([-0.6382, -0.6957,  1.0000], device='cuda:0')
             is_ray_valid = ray_end > ray_start
             if torch.any(is_ray_valid).item():
                 ray_start[~is_ray_valid] = ray_start[is_ray_valid].min()
                 ray_end[~is_ray_valid] = ray_start[is_ray_valid].max()
+            
             depths_coarse = self.sample_stratified(ray_origins, ray_start, ray_end, rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
         else:
             # Create stratified depth samples
             depths_coarse = self.sample_stratified(ray_origins, rendering_options['ray_start'], rendering_options['ray_end'], rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
 
         # Coarse Pass
+        breakpoint()
+        
         colors_coarse, densities_coarse = self._forward_pass(
             depths=depths_coarse, ray_directions=ray_directions, ray_origins=ray_origins,
             planes=planes, decoder=decoder, rendering_options=rendering_options)
 
         # Fine Pass
         N_importance = rendering_options['depth_resolution_importance']
+        breakpoint()
+        
         if N_importance > 0:
+            breakpoint()
+            
             _, _, weights = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options)
 
             depths_fine = self.sample_importance(depths_coarse, weights, N_importance)
@@ -184,9 +218,14 @@ class ImportanceRenderer(torch.nn.Module):
         return rgb_final, depth_final, weights.sum(2)
 
     def run_model(self, planes, decoder, sample_coordinates, sample_directions, options):
+        breakpoint()
         plane_axes = self.plane_axes.to(planes.device)
+        # coordinate is sampled in self.rendering_kwargs['sampler_bbox_min'] and self.rendering_kwargs['sampler_bbox_max'] 
+        # but no filtering is applied here
+        # so there are a few out-of-box samples 
         sampled_features = sample_from_planes(plane_axes, planes, sample_coordinates, padding_mode='zeros', box_warp=options['box_warp'])
 
+        # sampled_features : [num_view, 3, num_ray*sampling_per_ray,dimention]
         out = decoder(sampled_features, sample_directions)
         if options.get('density_noise', 0) > 0:
             out['sigma'] += torch.randn_like(out['sigma']) * options['density_noise']
@@ -222,14 +261,21 @@ class ImportanceRenderer(torch.nn.Module):
         """
         N, M, _ = ray_origins.shape
         if disparity_space_sampling:
+            
             depths_coarse = torch.linspace(0,
                                     1,
                                     depth_resolution,
                                     device=ray_origins.device).reshape(1, 1, depth_resolution, 1).repeat(N, M, 1, 1)
+            # sampling between start to end uniformly; start and end are sampled ; depths_coarse shape [N, M, depth_resolution, 1]
             depth_delta = 1/(depth_resolution - 1)
+            # depth delta is the distance between two samples
+            # [N, M, 1]
+            # depth_delta[i,j] == depths_coarse[i,j,1] - depths_coarse[i,j,0]
             depths_coarse += torch.rand_like(depths_coarse) * depth_delta
+            # add gaussian noise with mean 0 and std depth_delta
             depths_coarse = 1./(1./ray_start * (1. - depths_coarse) + 1./ray_end * depths_coarse)
         else:
+            
             if type(ray_start) == torch.Tensor:
                 depths_coarse = math_utils.linspace(ray_start, ray_end, depth_resolution).permute(1,2,0,3)
                 depth_delta = (ray_end - ray_start) / (depth_resolution - 1)

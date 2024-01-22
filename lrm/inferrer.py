@@ -112,6 +112,18 @@ class LRMInferrer:
         canonical_camera_intrinsics = self._default_intrinsics().unsqueeze(0)
         source_camera = build_camera_principle(canonical_camera_extrinsics, canonical_camera_intrinsics)
         return source_camera.repeat(batch_size, 1)
+    
+    def _default_source_camera2(self, batch_size: int = 1):
+        # return: (N, D_cam_raw)
+        dist_to_center = 2
+        canonical_camera_extrinsics = torch.tensor([[
+            [1, 0, 0, 0],
+            [0, 1, 0, -dist_to_center],
+            [0, 0, 1, 0],
+        ]], dtype=torch.float32)
+        canonical_camera_intrinsics = self._default_intrinsics().unsqueeze(0)
+        source_camera = build_camera_principle(canonical_camera_extrinsics, canonical_camera_intrinsics)
+        return source_camera.repeat(batch_size, 1)
 
     def _default_render_cameras(self, batch_size: int = 1):
         # return: (N, M, D_cam_render)

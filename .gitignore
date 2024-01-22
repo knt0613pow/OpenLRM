@@ -50,3 +50,10 @@ Thumbs.db
 *.swp
 *.swo
 *.~*
+
+
+
+
+# custom
+*.ply
+dumps*/*
